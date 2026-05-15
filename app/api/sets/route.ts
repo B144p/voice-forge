@@ -1,10 +1,10 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { z } from 'zod'
 import { requireApproved, errorResponse, AppError } from '@/lib/authz'
 import { db } from '@/lib/db'
-import { listVoices, tts, MODEL_ID } from '@/lib/elevenlabs'
-import { uploadMp3, itemR2Key } from '@/lib/r2'
-import { logUsage, checkMonthlyCapExceeded } from '@/lib/usage'
+import { listVoices, invalidateVoiceCache, MODEL_ID } from '@/lib/elevenlabs'
+import { checkMonthlyCapExceeded } from '@/lib/usage'
+import { runSetJob } from '@/lib/jobs'
 
 const createSetSchema = z.object({
   title: z.string().min(1).max(100).trim(),
@@ -39,17 +39,31 @@ export async function POST(req: Request) {
       const issue = parsed.error.issues[0]
       if (issue?.path[0] === 'items' && typeof issue.path[1] === 'number') {
         return NextResponse.json(
-          { error: { code: 'INVALID_ITEM', message: issue.message, details: { index: issue.path[1] } } },
+          {
+            error: {
+              code: 'INVALID_ITEM',
+              message: issue.message,
+              details: { index: issue.path[1] },
+            },
+          },
           { status: 400 },
         )
       }
-      throw new AppError(parsed.error.issues[0]?.message ?? 'Validation error', 400, 'VALIDATION_ERROR')
+      throw new AppError(
+        parsed.error.issues[0]?.message ?? 'Validation error',
+        400,
+        'VALIDATION_ERROR',
+      )
     }
 
     const { title, voiceId, items } = parsed.data
 
     if (items.length > 30) {
-      throw new AppError(`Maximum 30 items per Set. Received ${items.length}.`, 400, 'TOO_MANY_ITEMS')
+      throw new AppError(
+        `Maximum 30 items per Set. Received ${items.length}.`,
+        400,
+        'TOO_MANY_ITEMS',
+      )
     }
 
     for (let i = 0; i < items.length; i++) {
@@ -57,14 +71,22 @@ export async function POST(req: Request) {
         throw new AppError('Item text cannot be empty after trimming.', 400, 'EMPTY_ITEM')
       }
       if (items[i].text.length > 5000) {
-        throw new AppError('Item text exceeds 5000 characters.', 400, 'ITEM_TOO_LONG')
+        return NextResponse.json(
+          {
+            error: {
+              code: 'ITEM_TOO_LONG',
+              message: 'Item text exceeds 5000 characters.',
+              details: { index: i },
+            },
+          },
+          { status: 400 },
+        )
       }
     }
 
-    // Validate voiceId against cached list (re-fetch once if missing)
+    // Validate voiceId — re-fetch once if not in cache
     let voices = await listVoices()
     if (!voices.find((v) => v.voiceId === voiceId)) {
-      const { invalidateVoiceCache } = await import('@/lib/elevenlabs')
       invalidateVoiceCache()
       voices = await listVoices()
       if (!voices.find((v) => v.voiceId === voiceId)) {
@@ -77,7 +99,6 @@ export async function POST(req: Request) {
 
     await checkMonthlyCapExceeded(user.id, totalCharacters)
 
-    // Create SpeechSet, SpeechItems, and Job in one transaction
     const set = await db.$transaction(async (tx) => {
       const newSet = await tx.speechSet.create({
         data: {
@@ -99,104 +120,22 @@ export async function POST(req: Request) {
             })),
           },
         },
-        include: { items: true },
       })
 
       await tx.job.create({
-        data: {
-          setId: newSet.id,
-          status: 'queued',
-          itemsTotal: items.length,
-        },
+        data: { setId: newSet.id, status: 'queued', itemsTotal: items.length },
       })
 
       return newSet
     })
 
-    // For now: run synchronously (Phase 4 will move to waitUntil background)
-    await runJob(set.id, user.id, voiceId, MODEL_ID)
+    // Run job in background after response is sent
+    after(() => runSetJob(set.id))
 
     return NextResponse.json({ id: set.id }, { status: 202 })
   } catch (err) {
     return errorResponse(err)
   }
-}
-
-async function runJob(setId: string, userId: string, voiceId: string, modelId: string) {
-  const { default: pLimit } = await import('p-limit')
-  const limit = pLimit(2)
-
-  await db.job.update({
-    where: { setId },
-    data: { status: 'running', startedAt: new Date() },
-  })
-  await db.speechSet.update({ where: { id: setId }, data: { status: 'processing' } })
-
-  const items = await db.speechItem.findMany({
-    where: { setId },
-    orderBy: { index: 'asc' },
-  })
-
-  const tasks = items.map((item) =>
-    limit(async () => {
-      try {
-        await db.speechItem.update({ where: { id: item.id }, data: { status: 'processing' } })
-
-        const mp3 = await tts(item.text, voiceId, item.seed)
-        const key = itemR2Key(userId, setId, item.id)
-        await uploadMp3(key, mp3)
-
-        await db.speechItem.update({
-          where: { id: item.id },
-          data: { status: 'completed', r2Key: key },
-        })
-
-        await logUsage({
-          userId,
-          setId,
-          itemId: item.id,
-          action: 'generate',
-          characters: item.characterCount,
-          model: modelId,
-          voiceId,
-        })
-
-        await db.job.update({
-          where: { setId },
-          data: { itemsCompleted: { increment: 1 }, heartbeatAt: new Date() },
-        })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Unknown error'
-        await db.speechItem.update({
-          where: { id: item.id },
-          data: { status: 'failed', errorMessage: msg },
-        })
-        await db.job.update({
-          where: { setId },
-          data: { itemsFailed: { increment: 1 }, heartbeatAt: new Date() },
-        })
-      }
-    }),
-  )
-
-  await Promise.all(tasks)
-
-  const job = await db.job.findUniqueOrThrow({ where: { setId } })
-  const finalStatus =
-    job.itemsFailed === 0
-      ? 'completed'
-      : job.itemsCompleted === 0
-        ? 'failed'
-        : 'partial'
-
-  await db.job.update({
-    where: { setId },
-    data: { status: job.itemsFailed === 0 ? 'completed' : 'failed', finishedAt: new Date() },
-  })
-  await db.speechSet.update({
-    where: { id: setId },
-    data: { status: finalStatus },
-  })
 }
 
 export async function GET(req: Request) {
@@ -229,11 +168,11 @@ export async function GET(req: Request) {
     })
 
     const hasMore = sets.length > PAGE_SIZE
-    const items = hasMore ? sets.slice(0, PAGE_SIZE) : sets
+    const pageItems = hasMore ? sets.slice(0, PAGE_SIZE) : sets
 
     return NextResponse.json({
-      items,
-      nextCursor: hasMore ? items[items.length - 1]?.id : null,
+      items: pageItems,
+      nextCursor: hasMore ? pageItems[pageItems.length - 1]?.id : null,
     })
   } catch (err) {
     return errorResponse(err)
