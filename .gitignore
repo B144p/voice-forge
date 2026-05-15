@@ -40,4 +40,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# local dev mock storage
+/tmp/
+
 requirement.md

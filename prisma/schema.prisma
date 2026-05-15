@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("POSTGRES_URL")
+  directUrl = env("POSTGRES_URL_NON_POOLING")
+}
+
+enum UserRole {
+  user
+  admin
+}
+
+enum UserStatus {
+  pending
+  approved
+  revoked
+}
+
+enum SetStatus {
+  pending
+  processing
+  completed
+  partial
+  failed
+}
+
+enum ItemStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum JobStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum UsageAction {
+  generate
+  regenerate
+}
+
+model User {
+  id               String      @id @default(cuid())
+  email            String      @unique
+  name             String?
+  image            String?
+  role             UserRole    @default(user)
+  status           UserStatus  @default(pending)
+  monthlyCharLimit Int?
+  lastLoginAt      DateTime?
+  createdAt        DateTime    @default(now())
+  sets             SpeechSet[]
+  usageLogs        UsageLog[]
+}
+
+model SpeechSet {
+  id              String      @id @default(cuid())
+  userId          String
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title           String
+  voiceId         String
+  voiceName       String
+  modelId         String      @default("eleven_multilingual_v2")
+  status          SetStatus   @default(pending)
+  totalCharacters Int         @default(0)
+  itemCount       Int
+  items           SpeechItem[]
+  job             Job?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([userId, title])
+}
+
+model SpeechItem {
+  id                String     @id @default(cuid())
+  setId             String
+  set               SpeechSet  @relation(fields: [setId], references: [id], onDelete: Cascade)
+  index             Int
+  text              String     @db.Text
+  seed              Int
+  r2Key             String?
+  status            ItemStatus @default(pending)
+  characterCount    Int
+  durationSeconds   Float?
+  regenerationCount Int        @default(0)
+  errorMessage      String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@unique([setId, index])
+}
+
+model Job {
+  id             String    @id @default(cuid())
+  setId          String    @unique
+  set            SpeechSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+  status         JobStatus @default(queued)
+  itemsTotal     Int
+  itemsCompleted Int       @default(0)
+  itemsFailed    Int       @default(0)
+  heartbeatAt    DateTime?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  errorMessage   String?
+}
+
+model UsageLog {
+  id         String      @id @default(cuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id])
+  setId      String?
+  itemId     String?
+  action     UsageAction
+  characters Int
+  model      String
+  voiceId    String
+  costUsd    Decimal     @db.Decimal(10, 6)
+  createdAt  DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+}
