@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireOwner, errorResponse, AppError } from '@/lib/authz'
+import { checkRateLimit } from '@/lib/rate-limit'
 import { db } from '@/lib/db'
 import { tts, MODEL_ID } from '@/lib/elevenlabs'
 import { uploadMp3, itemR2Key } from '@/lib/r2'
@@ -12,6 +13,9 @@ export async function POST(
   try {
     const { id: setId, itemId } = await params
     const { user, set } = await requireOwner(setId)
+
+    const rateLimitRes = await checkRateLimit(user.id)
+    if (rateLimitRes) return rateLimitRes
 
     const item = await db.speechItem.findFirst({ where: { id: itemId, setId } })
     if (!item) throw new AppError('Item not found.', 404, 'NOT_FOUND')

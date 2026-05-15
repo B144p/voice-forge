@@ -5,9 +5,10 @@ import { db } from '@/lib/db'
 import { listVoices, invalidateVoiceCache, MODEL_ID } from '@/lib/elevenlabs'
 import { checkMonthlyCapExceeded } from '@/lib/usage'
 import { runSetJob } from '@/lib/jobs'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 const createSetSchema = z.object({
-  title: z.string().min(1).max(100).trim(),
+  title: z.string().trim().min(1).max(100),
   voiceId: z.string().min(1),
   items: z
     .array(
@@ -26,6 +27,9 @@ const createSetSchema = z.object({
 export async function POST(req: Request) {
   try {
     const user = await requireApproved()
+
+    const rateLimitRes = await checkRateLimit(user.id)
+    if (rateLimitRes) return rateLimitRes
 
     let body: unknown
     try {
