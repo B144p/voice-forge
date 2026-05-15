@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server'
 
-const isMock = !process.env.UPSTASH_REDIS_REST_URL
-
 /** Checks rate limit: 60 req/min per userId. Returns 429 response if exceeded, null if ok. */
 export async function checkRateLimit(userId: string): Promise<NextResponse | null> {
-  if (isMock) return null
+  if (!process.env.UPSTASH_REDIS_REST_URL) return null
 
   const { Ratelimit } = await import('@upstash/ratelimit')
   const { Redis } = await import('@upstash/redis')

@@ -3,63 +3,67 @@ import type { VoiceOption } from '@/types'
 const API_BASE = 'https://api.elevenlabs.io'
 const MODEL_ID = 'eleven_multilingual_v2'
 
-// In-memory cache with 1h TTL
-let voiceCache: { voices: VoiceOption[]; fetchedAt: number } | null = null
+// In-memory cache with 1h TTL, keyed by language ('' = all languages)
+const voiceCacheMap = new Map<string, { voices: VoiceOption[]; fetchedAt: number }>()
 const CACHE_TTL_MS = 60 * 60 * 1000
 
-const MOCK_VOICES: VoiceOption[] = [
-  { voiceId: 'mock-voice-1', name: 'Rachel (Mock)', language: 'en', previewUrl: null },
-  { voiceId: 'mock-voice-2', name: 'Domi (Mock)', language: 'en', previewUrl: null },
-  { voiceId: 'mock-voice-3', name: 'Bella (Mock)', language: 'en', previewUrl: null },
-  { voiceId: 'mock-voice-4', name: 'Antoni (Mock)', language: 'en', previewUrl: null },
-  { voiceId: 'mock-voice-5', name: 'Elli (Mock)', language: 'en', previewUrl: null },
-]
+/**
+ * Lists voices: user's own voices + shared library voices, merged and deduped, cached 1h.
+ * Pass `language` (e.g. "zh", "en") to fetch shared voices filtered to that language.
+ */
+export async function listVoices(language?: string): Promise<VoiceOption[]> {
+  const cacheKey = language ?? ''
+  const cached = voiceCacheMap.get(cacheKey)
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.voices
 
-/** Minimal valid MP3 frame (silence) used in mock mode. */
-const MOCK_MP3 = Buffer.from(
-  'fffb9004000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
-  'hex',
-)
+  const headers = { 'xi-api-key': process.env.ELEVENLABS_API_KEY! }
+  const sharedUrl = language
+    ? `${API_BASE}/v1/shared-voices?page_size=100&language=${encodeURIComponent(language)}`
+    : `${API_BASE}/v1/shared-voices?page_size=100`
 
-/** Lists voices from ElevenLabs (admin's My Voices + defaults), cached 1h. */
-export async function listVoices(): Promise<VoiceOption[]> {
-  if (process.env.MOCK_EXTERNAL_SERVICES === 'true') return MOCK_VOICES
+  const [ownRes, sharedRes] = await Promise.all([
+    fetch(`${API_BASE}/v1/voices`, { headers, next: { revalidate: 0 } }),
+    fetch(sharedUrl, { headers, next: { revalidate: 0 } }),
+  ])
 
-  if (voiceCache && Date.now() - voiceCache.fetchedAt < CACHE_TTL_MS) {
-    return voiceCache.voices
-  }
+  if (!ownRes.ok) throw new Error(`ElevenLabs /v1/voices failed: ${ownRes.status}`)
+  if (!sharedRes.ok) throw new Error(`ElevenLabs /v1/shared-voices failed: ${sharedRes.status}`)
 
-  const res = await fetch(`${API_BASE}/v1/voices`, {
-    headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY! },
-    next: { revalidate: 0 },
-  })
+  const [ownJson, sharedJson] = await Promise.all([ownRes.json(), sharedRes.json()])
 
-  if (!res.ok) throw new Error(`ElevenLabs /v1/voices failed: ${res.status}`)
-
-  const json = await res.json()
-  const voices: VoiceOption[] = (json.voices ?? []).map((v: Record<string, unknown>) => ({
+  const ownVoices: VoiceOption[] = (ownJson.voices ?? []).map((v: Record<string, unknown>) => ({
     voiceId: v.voice_id as string,
     name: v.name as string,
-    language: ((v.labels as Record<string, string>)?.language ?? 'en') as string,
+    language: ((v.labels as Record<string, string>)?.language ?? null),
     previewUrl: (v.preview_url as string | null) ?? null,
+    category: (v.category as string | null) ?? null,
   }))
 
-  voiceCache = { voices, fetchedAt: Date.now() }
-  return voices
+  const sharedVoices: VoiceOption[] = (sharedJson.voices ?? []).map((v: Record<string, unknown>) => ({
+    voiceId: v.voice_id as string,
+    name: v.name as string,
+    language: (v.language as string | null) ?? null,
+    previewUrl: (v.preview_url as string | null) ?? null,
+    category: 'community',
+  }))
+
+  const seen = new Set(ownVoices.map((v) => v.voiceId))
+  const merged = [
+    ...ownVoices,
+    ...sharedVoices.filter((v) => !seen.has(v.voiceId)),
+  ].sort((a, b) => a.name.localeCompare(b.name))
+
+  voiceCacheMap.set(cacheKey, { voices: merged, fetchedAt: Date.now() })
+  return merged
 }
 
 /** Invalidate voice cache (e.g. after admin adds voices). */
 export function invalidateVoiceCache() {
-  voiceCache = null
+  voiceCacheMap.clear()
 }
 
 /** Calls ElevenLabs TTS and returns MP3 bytes. Retries on 429/5xx (max 3). */
 export async function tts(text: string, voiceId: string, seed: number): Promise<Buffer> {
-  if (process.env.MOCK_EXTERNAL_SERVICES === 'true') {
-    await new Promise((r) => setTimeout(r, 200))
-    return MOCK_MP3
-  }
-
   const body = JSON.stringify({
     text,
     model_id: MODEL_ID,
@@ -89,6 +93,9 @@ export async function tts(text: string, voiceId: string, seed: number): Promise<
 
     if (res.status === 401 || res.status === 403) {
       throw new Error(`ElevenLabs auth error: ${res.status}`)
+    }
+    if (res.status === 402) {
+      throw new Error(`ElevenLabs quota exceeded: insufficient credits (402)`)
     }
 
     lastError = new Error(`ElevenLabs TTS failed: ${res.status}`)
