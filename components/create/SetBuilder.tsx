@@ -61,6 +61,7 @@ export function SetBuilder({ voices }: SetBuilderProps) {
         body: JSON.stringify({
           title: title || `${voiceName} — ${new Date().toLocaleDateString()}`,
           voiceId,
+          voiceName,
           items: filledItems.map((text) => ({ text })),
         }),
       })

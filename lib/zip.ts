@@ -1,5 +1,4 @@
-import archiver from 'archiver'
-import { Readable, PassThrough } from 'stream'
+import { zipSync } from 'fflate'
 
 interface ZipItem {
   index: number
@@ -7,7 +6,6 @@ interface ZipItem {
   buffer: Buffer
 }
 
-/** Sanitizes a filename component: keep [A-Za-z0-9_-], replace others with _. */
 function sanitizeFilename(text: string, maxLen = 60): string {
   return text
     .replace(/[^A-Za-z0-9_\-]/g, '_')
@@ -15,23 +13,16 @@ function sanitizeFilename(text: string, maxLen = 60): string {
     .slice(0, maxLen)
 }
 
-/**
- * Streams a ZIP of the given items to a Node.js Writable (e.g. PassThrough).
- * Filenames: 01_<sanitized-text>.mp3
- */
-export function createZipStream(items: ZipItem[]): PassThrough {
-  const pass = new PassThrough()
-  const archive = archiver('zip', { zlib: { level: 0 } })
-
-  archive.pipe(pass)
+/** Returns a ZIP buffer of the given MP3 items. Filenames: 01_<sanitized-text>.mp3 */
+export function createZipBuffer(items: ZipItem[]): Buffer {
+  const files: Record<string, Uint8Array> = {}
 
   for (const item of items) {
     const prefix = String(item.index + 1).padStart(2, '0')
     const name = sanitizeFilename(item.text)
     const filename = `${prefix}_${name}.mp3`.slice(0, 80)
-    archive.append(Readable.from(item.buffer), { name: filename })
+    files[filename] = new Uint8Array(item.buffer)
   }
 
-  archive.finalize()
-  return pass
+  return Buffer.from(zipSync(files, { level: 0 }))
 }

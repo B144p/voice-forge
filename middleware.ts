@@ -2,7 +2,7 @@ import { auth } from '@/lib/auth'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-const PUBLIC_PATHS = ['/login', '/waiting', '/revoked', '/api/auth']
+const PUBLIC_PATHS = ['/login', '/waiting', '/revoked', '/api/auth', '/api/me/status']
 
 export default auth(function middleware(req: NextRequest & { auth: { user?: { id?: string; role?: string; status?: string } } | null }) {
   const { pathname } = req.nextUrl

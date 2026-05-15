@@ -5,8 +5,9 @@ export type { UserRole, UserStatus, SetStatus, ItemStatus, JobStatus, UsageActio
 export interface VoiceOption {
   voiceId: string
   name: string
-  language: string
+  language: string | null
   previewUrl: string | null
+  category: string | null  // 'premade' = free built-in; 'community' = requires paid plan
 }
 
 export interface SetStatusResponse {

@@ -2,7 +2,7 @@ import { NextResponse, after } from 'next/server'
 import { z } from 'zod'
 import { requireApproved, errorResponse, AppError } from '@/lib/authz'
 import { db } from '@/lib/db'
-import { listVoices, invalidateVoiceCache, MODEL_ID } from '@/lib/elevenlabs'
+import { MODEL_ID } from '@/lib/elevenlabs'
 import { checkMonthlyCapExceeded } from '@/lib/usage'
 import { runSetJob } from '@/lib/jobs'
 import { checkRateLimit } from '@/lib/rate-limit'
@@ -10,6 +10,7 @@ import { checkRateLimit } from '@/lib/rate-limit'
 const createSetSchema = z.object({
   title: z.string().trim().min(1).max(100),
   voiceId: z.string().min(1),
+  voiceName: z.string().min(1),
   items: z
     .array(
       z.object({
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
       )
     }
 
-    const { title, voiceId, items } = parsed.data
+    const { title, voiceId, voiceName, items } = parsed.data
 
     if (items.length > 30) {
       throw new AppError(
@@ -88,17 +89,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // Validate voiceId — re-fetch once if not in cache
-    let voices = await listVoices()
-    if (!voices.find((v) => v.voiceId === voiceId)) {
-      invalidateVoiceCache()
-      voices = await listVoices()
-      if (!voices.find((v) => v.voiceId === voiceId)) {
-        throw new AppError('Unknown voice ID.', 400, 'INVALID_VOICE')
-      }
-    }
-
-    const voiceName = voices.find((v) => v.voiceId === voiceId)!.name
     const totalCharacters = items.reduce((sum, item) => sum + item.text.length, 0)
 
     await checkMonthlyCapExceeded(user.id, totalCharacters)

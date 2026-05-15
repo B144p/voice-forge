@@ -1,5 +1,6 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Clock } from 'lucide-react'
+import { WaitingActions } from './actions'
 
 export default function WaitingPage() {
   return (
@@ -20,6 +21,9 @@ export default function WaitingPage() {
             Please reach out to your team admin if this is taking too long.
           </p>
         </CardContent>
+        <CardFooter>
+          <WaitingActions />
+        </CardFooter>
       </Card>
     </div>
   )
